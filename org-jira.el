@@ -1153,6 +1153,12 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
                         (org-jira-entry-put (point) (symbol-name entry) val))))
                   '(filename reporter type type-id priority labels resolution status components created updated sprint))
 
+            (let ((val (slot-value Issue 'timeestimate)))
+                      (when val
+                      (org-jira-entry-put (point) "timeestimate" (number-to-string val))
+                      (org-jira-entry-put (point) "Effort" (format "%02d:%02d" (/ val 3600) (% (/ val 60) 60)))
+                      ))
+            
             (when parent-key
               (org-jira-entry-put (point) "parent-issue-key" (format "[jira:%s]" parent-key)))
 

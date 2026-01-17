@@ -114,6 +114,7 @@
    (type :type string :initarg :type)
    (type-id :type string :initarg :type-id)
    (updated :type string :initarg :updated)
+   (timeestimate :type (or null integer) :initarg :timeestimate :documentation "Time estimate from Jira in seconds")
    (data :initarg :data :documentation "The remote Jira data object (alist).")
    (hydrate-fn :initform #'jiralib-get-issue :initarg :hydrate-fn))
   "An issue on the end.  ID of the form EX-1, or a numeric such as 10000.")
@@ -170,6 +171,7 @@
      :type (path '(fields issuetype name))
      :type-id (path '(fields issuetype id))
      :updated (path '(fields updated))  ; confirm
+     :timeestimate (path '(fields timeestimate))
      ;; TODO: Remove this
      ;; :data (oref rec data)
      )))
