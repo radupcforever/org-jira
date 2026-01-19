@@ -337,6 +337,12 @@ See `org-default-priority' for more info."
   :group 'org-jira
   :type 'string)
 
+(defcustom org-jira-allocate-extra '()
+  "O lista de de perechi (nume_normalizat . count). Daca un task este alocat la o persoana cu nume normalizat care se regaseste in lista, atunci pune in proprietatea ALLOCATE mai multe id-uri. De ex. :ALLOCATE: nume_prenume, nume_prenume_1, ..., nume_prenume_count.
+  Optiunea este necesara pentru org-taskjuggler-export-and-process*. Daca taskurile pentru o persoana nu pot fi planificate datorita restrictiilor, vreau sa aloc taskurile respective mai multor persoane pentru ca taskjuggler sa poate produce un plan pentru a-l putea analiza."
+  :group 'org-jira
+  :type 'list)
+  
 (defvar org-jira-serv nil
   "Parameters of the currently selected blog.")
 
@@ -1147,12 +1153,33 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
               (org-back-to-heading t)
               (org-set-tags-to (replace-regexp-in-string "-" "_" issue-id)))
             (org-jira-entry-put (point) "assignee" (or (slot-value Issue 'assignee) "Unassigned"))
+            ;; taskjuggler export property: ALLOCATE
+            (let ((val_assignee (slot-value Issue 'assignee)))
+              (when (and val_assignee (not (string= val_assignee "")))
+                    (let* ((normalized
+                             (replace-regexp-in-string
+                              " +" "_"
+                              (downcase val_assignee)))
+                           (val_allocate_prop normalized)
+                           (allocate_extra 0))
+                      (setq allocate_extra (assoc-default normalized org-jira-allocate-extra))
+                      (when (and allocate_extra (numberp allocate_extra) (> allocate_extra 0))
+                          (dotimes (i allocate_extra)
+                            (setq val_allocate_prop
+                                  (concat val_allocate_prop
+                                          ","
+                                          (concat normalized "_" (number-to-string (+ i 1)))
+                                          ))))
+                      (org-jira-entry-put (point) "ALLOCATE" val_allocate_prop))))
+          
             (mapc (lambda (entry)
                     (let ((val (slot-value Issue entry)))
                       (when (and val (not (string= val "")))
                         (org-jira-entry-put (point) (symbol-name entry) val))))
                   '(filename reporter type type-id priority labels resolution status components created updated sprint))
 
+            ;; timeestimate property
+            ;; taskjuggler export property: Effort
             (let ((val (slot-value Issue 'timeestimate)))
                       (when val
                       (org-jira-entry-put (point) "timeestimate" (number-to-string val))
@@ -1193,7 +1220,7 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
                                                        (open-line 1)
                                                        (org-insert-subheading t))
                                                      (org-jira-insert entry-heading "\n"))
-
+                                                   (org-toggle-tag "noexport" 'on)
                                                    ;;  Insert 2 spaces of indentation so Jira markup won't cause org-markup
                                                    (org-jira-insert
                                                     (replace-regexp-in-string
@@ -2674,6 +2701,7 @@ boards -  list of `org-jira-sdk-board' records."
                                             (not (string-empty-p pval))
                                             (cond
                                              ((equal pname "ID")
+
                                               (list :id pval))
                                              ((equal pname "URL")
                                               (list :url pval))
