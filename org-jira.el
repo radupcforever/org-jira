@@ -342,7 +342,12 @@ See `org-default-priority' for more info."
   Optiunea este necesara pentru org-taskjuggler-export-and-process*. Daca taskurile pentru o persoana nu pot fi planificate datorita restrictiilor, vreau sa aloc taskurile respective mai multor persoane pentru ca taskjuggler sa poate produce un plan pentru a-l putea analiza."
   :group 'org-jira
   :type 'list)
-  
+
+(defcustom org-jira-security-level-default '()
+  "Id-ul security level default pt fiecare proiect. Necesar la crearea de tichete noi. O lista de forma (project-code . security-level-name)"
+  :group 'org-jira
+  :type 'list)
+
 (defvar org-jira-serv nil
   "Parameters of the currently selected blog.")
 
@@ -1161,27 +1166,32 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
                               " +" "_"
                               (downcase val_assignee)))
                            (val_allocate_prop normalized)
+                           (val_alternative "")
                            (allocate_extra 0))
                       (setq allocate_extra (assoc-default normalized org-jira-allocate-extra))
                       (when (and allocate_extra (numberp allocate_extra) (> allocate_extra 0))
-                          (dotimes (i allocate_extra)
-                            (setq val_allocate_prop
-                                  (concat val_allocate_prop
+                        (setq val_alternative (concat normalized "_0"))
+                        (if (> allocate_extra 1)
+                          (dotimes (i (- allocate_extra 1))
+                            (setq val_alternative
+                                  (concat val_alternative
                                           ","
                                           (concat normalized "_" (number-to-string (+ i 1)))
                                           ))))
+                        (setq val_alternative (concat "{alternative " val_alternative " select order}"))
+                        (setq val_allocate_prop (concat val_allocate_prop " " val_alternative)))
                       (org-jira-entry-put (point) "ALLOCATE" val_allocate_prop))))
           
             (mapc (lambda (entry)
                     (let ((val (slot-value Issue entry)))
                       (when (and val (not (string= val "")))
                         (org-jira-entry-put (point) (symbol-name entry) val))))
-                  '(filename reporter type type-id priority labels resolution status components created updated sprint))
+                  '(filename reporter type type-id priority labels resolution status components created updated sprint security-level))
 
             ;; timeestimate property
             ;; taskjuggler export property: Effort
             (let ((val (slot-value Issue 'timeestimate)))
-                      (when val
+                      (when (and val (> val 0))
                       (org-jira-entry-put (point) "timeestimate" (number-to-string val))
                       (org-jira-entry-put (point) "Effort" (format "%02d:%02d" (/ val 3600) (% (/ val 60) 60)))
                       ))
@@ -1253,7 +1263,7 @@ ISSUES is a list of `org-jira-sdk-issue' records."
   (org-jira-log (format "About to render %d issues." (length Issues)))
 
   ;; If we have any left, we map over them.
-  (mapc 'org-jira--render-issue Issues)
+  (mapc 'org-jira--render-issue  Issues)
 
   ;; Prior text: "Oh, are you the culprit?" - Not sure if this caused an issue at some point.
   ;; We want to ensure we fix broken org narrowing though, by doing org-show-all and then org-cycle.
@@ -1784,11 +1794,16 @@ purpose of wiping an old subtree."
   (ensure-on-todo
    (when (org-jira-parse-issue-id)
      (error "Already on jira ticket"))
+   (setq project (org-jira-read-project))
+   (setq security-level-name (assoc-default project org-jira-security-level-default))
+   (if (not security-level-name)
+       (setq security-level-name (concat project "-INTERN")))
    (save-excursion (org-jira-create-issue
-                    (org-jira-read-project)
+                    project
                     (org-jira-read-issue-type)
                     (org-get-heading t t)
-                    (org-get-entry)))
+                    (org-get-entry)
+                    security-level-name))
    (delete-region (point-min) (point-max))))
 
 ;;;###autoload
@@ -1915,7 +1930,7 @@ that should be bound to an issue."
    'org-jira-type-read-history
    (car org-jira-type-read-history)))
 
-(defun org-jira-get-issue-struct (project type summary description &optional parent-id)
+(defun org-jira-get-issue-struct (project type summary description security-level-name &optional parent-id)
   "Create an issue struct for PROJECT, of TYPE, with SUMMARY and DESCRIPTION."
   (if (or (equal project "") (equal type "") (equal summary ""))
       (error "Must provide all information!"))
@@ -1937,6 +1952,7 @@ that should be bound to an issue."
                                   "")))
             (description . ,description)
             (priority (id . ,priority))
+            (security (name . ,security-level-name))
             (labels . ,labels)
             (assignee (accountId . ,(cdr (assoc user jira-users))))))
          (filtered-fields (jiralib-filter-fields-by-exclude-list
@@ -1946,20 +1962,22 @@ that should be bound to an issue."
     ticket-struct))
 
 ;;;###autoload
-(defun org-jira-create-issue (project type summary description)
+(defun org-jira-create-issue (project type summary description security-level-name)
   "Create an issue in PROJECT, of type TYPE, with given SUMMARY and DESCRIPTION."
   (interactive
    (let* ((project (org-jira-read-project))
           (type (org-jira-read-issue-type project))
           (summary (read-string "Summary: "))
-          (description (read-string "Description: ")))
+          (description (read-string "Description: "))
+          (security-level-name (read-string "Security Level Name: ")))
      (list project type summary description)))
   (if (or (equal project "")
           (equal type "")
-          (equal summary ""))
+          (equal summary "")
+          (equal security-level-name ""))
       (error "Must provide all information!"))
   (let* ((parent-id nil)
-         (ticket-struct (org-jira-get-issue-struct project type summary description)))
+         (ticket-struct (org-jira-get-issue-struct project type summary description security-level-name)))
     (org-jira-get-issues (list (jiralib-create-issue ticket-struct)))))
 
 ;;;###autoload
@@ -2353,7 +2371,8 @@ otherwise it should return:
                                                        (jiralib-get-priorities)))
                    (cons 'description org-issue-description)
                    ;; If org-issue-assignee-username is set, grab the username instead of the assignee value
-                   (if (stringp org-issue-assignee-username)
+                   (if (and (stringp org-issue-assignee-username)
+                            (not (string-empty-p org-issue-assignee-username)))
                           (cons 'assignee (list (cons 'name org-issue-assignee-username)))
                           (cons 'assignee (list (cons 'id (jiralib-get-user-account-id project org-issue-assignee)))))
                    (cons 'summary (org-jira-strip-priority-tags (org-jira-get-issue-val-from-org 'summary)))

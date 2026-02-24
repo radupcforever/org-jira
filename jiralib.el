@@ -175,7 +175,8 @@ This will be used with USERNAME to compute password from
 
 (defvar jiralib-mode-hook nil)
 (defvar jiralib-mode-map nil)
-(defvar jiralib-issue-regexp "\\<\\(?:[A-Za-z0-9]+\\)-[0-9]+\\>")
+; (defvar jiralib-issue-regexp "\\<\\(?:[A-Za-z0-9]+\\)-[0-9]+\\>")
+(defvar jiralib-issue-regexp "\\(?:[A-Za-z0-9]+\\)-[0-9]+")
 
 (defcustom jiralib-wsdl-descriptor-url
   ""
@@ -498,7 +499,8 @@ request.el, so if at all possible, it should be avoided."
                       (format "/rest/api/2/issue/%s" (first params))
                       :type "PUT"
                       :data (json-encode `((fields . ,(second params))))))
-      ((getLabels) (jiralib--rest-call-it (format "/rest/api/2/label?startAt=%s" (first params)))))))
+      ((getLabels) (jiralib--rest-call-it (format "/rest/api/2/label?startAt=%s" (first params))))
+      )))
 
 (defun jiralib--soap-call-it (&rest args)
   "Deprecated SOAP call endpoint.  Will be removed soon.
@@ -761,7 +763,7 @@ Possible side-effects:
   - If the server has the project workflow updated, the cache
 saved here will be incorrect.
 
-  - If the issue is not up to date with the remote, the wrong
+ - If the issue is not up to date with the remote, the wrong
 cache key may be queried."
   :type 'boolean
   :group 'jiralib)
@@ -1368,6 +1370,5 @@ limit - limit total number of retrieved entries."
                      (message "jiralib agile retrieve: all done")))
                ('error (message (format "jiralib agile retrieve: caught error: %s" err)))))))
     (jiralib--agile-rest-call-it api max-results start-at limit query-params)))
-
 (provide 'jiralib)
 ;;; jiralib.el ends here
