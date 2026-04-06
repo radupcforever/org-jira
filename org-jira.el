@@ -338,8 +338,14 @@ See `org-default-priority' for more info."
   :type 'string)
 
 (defcustom org-jira-allocate-extra '()
-  "O lista de de perechi (nume_normalizat . count). Daca un task este alocat la o persoana cu nume normalizat care se regaseste in lista, atunci pune in proprietatea ALLOCATE mai multe id-uri. De ex. :ALLOCATE: nume_prenume, nume_prenume_1, ..., nume_prenume_count.
+  "taskjuggler related - O lista de de perechi (nume_normalizat . count). Daca un task este alocat la o persoana cu nume normalizat care se regaseste in lista, atunci pune in proprietatea ALLOCATE mai multe id-uri. De ex. :ALLOCATE: nume_prenume, nume_prenume_1, ..., nume_prenume_count.
   Optiunea este necesara pentru org-taskjuggler-export-and-process*. Daca taskurile pentru o persoana nu pot fi planificate datorita restrictiilor, vreau sa aloc taskurile respective mai multor persoane pentru ca taskjuggler sa poate produce un plan pentru a-l putea analiza."
+  :group 'org-jira
+  :type 'list)
+
+(defcustom org-jira-allocate-use-project-suffix '()
+  "taskjuggler related - O lista de nume normalizate care indica persoane care lucreaza pe mai multe proiecte. Pentru acestea, in proprietatea allocate se va genera un id cu suffix codul proiectului. De ex. :ALLOCATE: nume_prenume_codproiect.
+   In lista de resurse taskjuggler se vor defini subresurse pentru fiecare proiect. Aceste subresurse vor avea limits (de ex. 20% pe proiect 1, 80% pe proiecte 2). Resursa de baza va fi alocata 100%."
   :group 'org-jira
   :type 'list)
 
@@ -1168,6 +1174,10 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
                            (val_allocate_prop normalized)
                            (val_alternative "")
                            (allocate_extra 0))
+                      (when (member-ignore-case normalized org-jira-allocate-use-project-suffix)
+                        (setq normalized (concat normalized "_" (downcase proj-key)))
+                        (setq val_allocate_prop normalized)
+                      )
                       (setq allocate_extra (assoc-default normalized org-jira-allocate-extra))
                       (when (and allocate_extra (numberp allocate_extra) (> allocate_extra 0))
                         (setq val_alternative (concat normalized "_0"))
@@ -1191,7 +1201,11 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
             ;; timeestimate property
             ;; taskjuggler export property: Effort
             (let ((val (slot-value Issue 'timeestimate)))
-                      (when (and val (> val 0))
+              (if (not val)
+                  (setq val (* 30 60)))
+                      (if (and val (= val 0))
+                        (setq val (* 30 60)))
+                      (when (and val (>= val 0))
                       (org-jira-entry-put (point) "timeestimate" (number-to-string val))
                       (org-jira-entry-put (point) "Effort" (format "%02d:%02d" (/ val 3600) (% (/ val 60) 60)))
                       ))
