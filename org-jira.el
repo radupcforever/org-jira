@@ -9,7 +9,7 @@
 ;;
 ;; Maintainer: Matthew Carter <m@ahungry.com>
 ;; URL: https://github.com/ahungry/org-jira
-;; Version: 4.3.3
+;; Version: 4.4.2
 ;; Keywords: ahungry jira org bug tracker
 ;; Package-Requires: ((emacs "24.5") (cl-lib "0.5") (request "0.2.0") (dash "2.14.1"))
 
@@ -40,6 +40,7 @@
 
 ;;;; Changes in 4.4.2
 ;; - Fix for org-insert-subheading behavior change in org 9.7+ in render-issues
+;; - Group issues under component sub-headings within each project
 
 ;;;; Changes in 4.4.1
 ;; - Fix tag (4.3.3 was out of order - we had a 4.4.0 on repo)
@@ -354,6 +355,18 @@ See `org-default-priority' for more info."
   :group 'org-jira
   :type 'list)
 
+(defcustom org-jira-group-by-component t
+  "When non-nil, group issues under component sub-headings within each project heading.
+Issues with no component are grouped under a heading named by
+`org-jira-no-component-heading'."
+  :group 'org-jira
+  :type 'boolean)
+
+(defcustom org-jira-no-component-heading "No Component"
+  "Heading name used for issues that have no component assigned."
+  :group 'org-jira
+  :type 'string)
+
 (defvar org-jira-serv nil
   "Parameters of the currently selected blog.")
 
@@ -409,8 +422,8 @@ See `org-default-priority' for more info."
   `(save-excursion
     (save-restriction
       (widen)
-      (unless (looking-at "^\\*\\* ")
-        (search-backward-regexp "^\\*\\* " nil t)) ; go to top heading
+      (unless (looking-at "^\\*\\*\\* ")
+        (search-backward-regexp "^\\*\\*\\* " nil t)) ; go to top heading
       (let ((org-jira-id (org-jira-id)))
         (unless (and org-jira-id (string-match (jiralib-get-issue-regexp) (downcase org-jira-id)))
           (error "Not on an issue region!")))
@@ -645,6 +658,24 @@ it isn't already on."
   (-if-let (translation (cdr (assoc project-key org-jira-project-filename-alist)))
       (expand-file-name translation (org-jira--ensure-working-dir))
     (expand-file-name (concat project-key ".org") (org-jira--ensure-working-dir))))
+
+(defun org-jira--find-entry-with-id (issue-id)
+  "Find the org heading for ISSUE-ID in the current buffer.
+Return the point at the beginning of the heading, or nil if not found.
+Search both \"ID\" and \"CUSTOM_ID\" properties, since org-jira stores both."
+  (if (fboundp 'org-find-entry-with-id)
+      (org-find-entry-with-id issue-id)
+    (let ((pos nil))
+    (save-excursion
+      (goto-char (point-min))
+      (while (and (not pos) (re-search-forward "^\\*+ " nil t))
+        (org-back-to-heading t)
+        (let ((entry-id (org-entry-get nil "ID" t))
+              (entry-custom-id (org-entry-get nil "CUSTOM_ID" t)))
+          (when (or (and entry-id (string= entry-id issue-id))
+                    (and entry-custom-id (string= entry-custom-id issue-id)))
+            (setq pos (point))))))
+    pos)))
 
 (defun org-jira-get-project-lead (proj)
   (org-jira-find-value proj 'lead 'name))
@@ -1116,152 +1147,219 @@ ORG-JIRA-PROJ-KEY-OVERRIDE being set before and after running."
          (= 1 (org-element-property :level elem)))))
 
 (defun org-jira--maybe-render-top-heading (proj-key)
-  "Ensure that there is a headline for PROJ-KEY at the top of the file."
+  "Ensure that there is a level-1 headline for PROJ-KEY at the top of the file."
   (goto-char (point-min))
-  (let ((top-heading (format ".*%s-Tickets" proj-key))
-        (th-found? nil))
-    (while (and (not (eobp))
-                (not th-found?))
+  (let ((top-heading (format "^\\*\\s-*%s-Tickets\\s-*$" (regexp-quote proj-key))))
+    (unless (re-search-forward top-heading nil t)
+      (goto-char (point-max))
+      (unless (bolp) (insert "\n"))
+      (insert (format "* %s-Tickets\n" proj-key)))))
+
+(defun org-jira--is-component-headline? (component-name)
+  "Return non-nil if point is on a level-2 component headline for COMPONENT-NAME."
+  (let ((elem (org-element-at-point)))
+    (and (eq 'headline (car elem))
+         (equal component-name (org-element-property :title elem))
+         (= 2 (org-element-property :level elem)))))
+
+(defun org-jira--maybe-render-component-heading (proj-key component-name)
+  "Ensure a level-2 component sub-heading named COMPONENT-NAME exists under PROJ-KEY heading.
+Returns the position of the component heading."
+  (org-jira--maybe-render-top-heading proj-key)
+  (goto-char (point-min))
+  (let ((top-heading (format "^\\*\\s-*%s-Tickets\\s-*$" (regexp-quote proj-key)))
+        comp-pos)
+    (when (re-search-forward top-heading nil t)
       (beginning-of-line)
-      (when (org-jira--is-top-headline? proj-key) (setq th-found? t))
-      (re-search-forward top-heading nil 1 1))
-    (beginning-of-line)
-    (unless (looking-at top-heading)
-      (insert (format "\n* %s-Tickets\n" proj-key)))))
+      (org-narrow-to-subtree)
+      (let ((component-heading-re (format "^\\*\\*\\s-*%s\\s-*$" (regexp-quote component-name))))
+        (goto-char (point-min))
+        (when (re-search-forward component-heading-re nil t)
+          (beginning-of-line)
+          (setq comp-pos (point)))
+        (unless comp-pos
+          (goto-char (point-max))
+          (unless (bolp) (insert "\n"))
+          (insert (format "** %s\n" component-name))
+          (forward-line -1)
+          (beginning-of-line)))
+      (widen)
+      (goto-char (or comp-pos (point))))
+  (point)))
+
+(defun org-jira--get-issue-component-names (Issue)
+  "Return the list of component names for ISSUE, or (org-jira-no-component-heading) if none."
+  (let* ((raw-comps (org-trim (or (slot-value Issue 'components) "")))
+         (components (cl-remove-if
+                      (lambda (c) (string= (org-trim c) ""))
+                      (split-string raw-comps ",")))
+         (component-names (mapcar 'org-trim components)))
+    (if (null component-names)
+        (list org-jira-no-component-heading)
+      component-names)))
 
 (defun org-jira--render-issue (Issue)
-  "Render single ISSUE."
-;;  (org-jira-log "Rendering issue from issue list")
-;;  (org-jira-log (org-jira-sdk-dump Issue))
+  "Render single ISSUE, grouped under its component heading when grouping is enabled."
   (with-slots (filename proj-key issue-id summary status priority headline id parent-key) Issue
     (let (p)
       (with-current-buffer (org-jira--get-project-buffer Issue)
         (org-jira-freeze-ui
           (org-jira-maybe-activate-mode)
-          (org-jira--maybe-render-top-heading proj-key)
-          (setq p (org-find-entry-with-id issue-id))
-          (save-restriction
-            (if (and p (>= p (point-min))
-                     (<= p (point-max)))
-                (progn
-                  (goto-char p)
-                  (forward-thing 'whitespace)
-                  (org-jira-kill-line))
-              (goto-char (point-max))
-              (unless (looking-at "^")
-                (insert "\n"))
-              (insert "** "))
-            (org-jira-insert
-             (concat (org-jira-get-org-keyword-from-status status)
-                     " "
-                     (org-jira-get-org-priority-cookie-from-issue priority)
-                     headline))
-            (save-excursion
-              (unless (search-forward "\n" (point-max) 1)
-                (insert "\n")))
-            (org-narrow-to-subtree)
-            (save-excursion
-              (org-back-to-heading t)
-              (org-set-tags-to (replace-regexp-in-string "-" "_" issue-id)))
-            (org-jira-entry-put (point) "assignee" (or (slot-value Issue 'assignee) "Unassigned"))
-            ;; taskjuggler export property: ALLOCATE
-            (let ((val_assignee (slot-value Issue 'assignee)))
-              (when (and val_assignee (not (string= val_assignee "")))
-                    (let* ((normalized
-                             (replace-regexp-in-string
-                              " +" "_"
-                              (downcase val_assignee)))
-                           (val_allocate_prop normalized)
-                           (val_alternative "")
-                           (allocate_extra 0))
-                      (when (member-ignore-case normalized org-jira-allocate-use-project-suffix)
-                        (setq normalized (concat normalized "_" (downcase proj-key)))
-                        (setq val_allocate_prop normalized)
-                      )
-                      (setq allocate_extra (assoc-default normalized org-jira-allocate-extra))
-                      (when (and allocate_extra (numberp allocate_extra) (> allocate_extra 0))
-                        (setq val_alternative (concat normalized "_0"))
-                        (if (> allocate_extra 1)
-                          (dotimes (i (- allocate_extra 1))
-                            (setq val_alternative
-                                  (concat val_alternative
-                                          ","
-                                          (concat normalized "_" (number-to-string (+ i 1)))
-                                          ))))
-                        (setq val_alternative (concat "{alternative " val_alternative " select order}"))
-                        (setq val_allocate_prop (concat val_allocate_prop " " val_alternative)))
-                      (org-jira-entry-put (point) "ALLOCATE" val_allocate_prop))))
-          
-            (mapc (lambda (entry)
-                    (let ((val (slot-value Issue entry)))
-                      (when (and val (not (string= val "")))
-                        (org-jira-entry-put (point) (symbol-name entry) val))))
-                  '(filename reporter type type-id priority labels resolution status components created updated sprint security-level))
+          (if org-jira-group-by-component
+              ;; --- grouped mode: structure is * Project  ** Component  *** Issue ---
+              (let* ((component-names (org-jira--get-issue-component-names Issue))
+                     (component-name (car component-names))
+                     (clean-headline (oref Issue headline)))
+                ;; Ensure the target component exists and insert the issue under it
+                ;; First, remove any existing instance of this issue anywhere in the file
+                (save-excursion
+                  (widen)
+                  (setq p (org-jira--find-entry-with-id issue-id))
+                  (when p
+                    (goto-char p)
+                    (org-back-to-heading t)
+                    (delete-region (point) (save-excursion (org-end-of-subtree t t)))))
+                (let ((comp-pos (org-jira--maybe-render-component-heading proj-key component-name)))
+                  (goto-char comp-pos)
+                  (save-restriction
+                    (org-narrow-to-subtree)
+                    ;; Go to end of component subtree and insert fresh issue heading
+                    (goto-char (point-max))
+                    (unless (bolp) (insert "\n"))
+                    (insert "*** ")
+                    (org-jira-insert
+                     (concat (org-jira-get-org-keyword-from-status status)
+                             " "
+                             (org-jira-get-org-priority-cookie-from-issue priority)
+                             clean-headline))
+                    (save-excursion
+                      (unless (search-forward "\n" (point-max) 1)
+                        (insert "\n")))
+                    (org-narrow-to-subtree)
+                    (save-excursion
+                      (org-back-to-heading t)
+                      (org-set-tags-to (replace-regexp-in-string "-" "_" issue-id)))
+                    (org-jira--fill-issue-properties Issue)
+                    (when org-jira-download-comments
+                      (org-jira-update-comments-for-issue Issue))
+                    (when org-jira-worklog-sync-p
+                      (org-jira-update-worklogs-for-issue issue-id filename)))))
 
-            ;; timeestimate property
-            ;; taskjuggler export property: Effort
-            (let ((val (slot-value Issue 'timeestimate)))
-              (if (not val)
-                  (setq val (* 30 60)))
-                      (if (and val (= val 0))
-                        (setq val (* 30 60)))
-                      (when (and val (>= val 0))
-                      (org-jira-entry-put (point) "timeestimate" (number-to-string val))
-                      (org-jira-entry-put (point) "Effort" (format "%02d:%02d" (/ val 3600) (% (/ val 60) 60)))
-                      ))
-            
-            (when parent-key
-              (org-jira-entry-put (point) "parent-issue-key" (format "[jira:%s]" parent-key)))
+            ;; --- flat mode (original behaviour): structure is * Project  ** Issue ---
+            (org-jira--maybe-render-top-heading proj-key)
+            (setq p (org-jira--find-entry-with-id issue-id))
+            (save-restriction
+              (if (and p (>= p (point-min)) (<= p (point-max)))
+                  (progn
+                    (goto-char p)
+                    (forward-thing 'whitespace)
+                    (org-jira-kill-line))
+                (goto-char (point-max))
+                (unless (looking-at "^") (insert "\n"))
+                (insert "** "))
+              (org-jira-insert
+               (concat (org-jira-get-org-keyword-from-status status)
+                       " "
+                       (org-jira-get-org-priority-cookie-from-issue priority)
+                       headline))
+              (save-excursion
+                (unless (search-forward "\n" (point-max) 1)
+                  (insert "\n")))
+              (org-narrow-to-subtree)
+              (save-excursion
+                (org-back-to-heading t)
+                (org-set-tags-to (replace-regexp-in-string "-" "_" issue-id)))
+              (org-jira--fill-issue-properties Issue)
+              (when org-jira-download-comments
+                (org-jira-update-comments-for-issue Issue))
+              (when org-jira-worklog-sync-p
+                (org-jira-update-worklogs-for-issue issue-id filename)))))))))
 
-            (org-jira-entry-put (point) "ID" issue-id)
-            (org-jira-entry-put (point) "CUSTOM_ID" issue-id)
+(defun org-jira--fill-issue-properties (Issue)
+  "Insert/update all org properties and sub-headings for ISSUE at point.
+Point must be inside a narrowed subtree for the issue heading."
+  (with-slots (filename proj-key issue-id summary status priority headline id parent-key) Issue
+    (org-jira-entry-put (point) "assignee" (or (slot-value Issue 'assignee) "Unassigned"))
+    ;; taskjuggler export property: ALLOCATE
+    (let ((val_assignee (slot-value Issue 'assignee)))
+      (when (and val_assignee (not (string= val_assignee "")))
+        (let* ((normalized
+                (replace-regexp-in-string
+                 " +" "_"
+                 (downcase val_assignee)))
+               (val_allocate_prop normalized)
+               (val_alternative "")
+               (allocate_extra 0))
+          (when (member-ignore-case normalized org-jira-allocate-use-project-suffix)
+            (setq normalized (concat normalized "_" (downcase proj-key)))
+            (setq val_allocate_prop normalized))
+          (setq allocate_extra (assoc-default normalized org-jira-allocate-extra))
+          (when (and allocate_extra (numberp allocate_extra) (> allocate_extra 0))
+            (setq val_alternative (concat normalized "_0"))
+            (if (> allocate_extra 1)
+                (dotimes (i (- allocate_extra 1))
+                  (setq val_alternative
+                        (concat val_alternative
+                                ","
+                                (concat normalized "_" (number-to-string (+ i 1)))))))
+            (setq val_alternative (concat "{alternative " val_alternative " select order}"))
+            (setq val_allocate_prop (concat val_allocate_prop " " val_alternative)))
+          (org-jira-entry-put (point) "ALLOCATE" val_allocate_prop))))
 
-            ;; Insert the duedate as a deadline if it exists
-            (when org-jira-deadline-duedate-sync-p
-              (let ((duedate (oref Issue duedate)))
-                (when (> (length duedate) 0)
-                  (org-deadline nil duedate))))
+    (mapc (lambda (entry)
+            (let ((val (slot-value Issue entry)))
+              (when (and val (not (string= val "")))
+                (org-jira-entry-put (point) (symbol-name entry) val))))
+          '(filename reporter type type-id priority labels resolution status components created updated sprint security-level))
 
-            (mapc
-             (lambda (heading-entry)
-               (ensure-on-issue-id-with-filename issue-id filename
-                                                 (let* ((entry-heading
-                                                         (concat (symbol-name heading-entry)
-                                                                 (format ": [[%s][%s]]"
-                                                                         (concat jiralib-url "/browse/" issue-id) issue-id))))
-                                                   (setq p (org-find-exact-headline-in-buffer entry-heading))
-                                                   (if (and p (>= p (point-min))
-                                                            (<= p (point-max)))
-                                                       (progn
-                                                         (goto-char p)
-                                                         (org-narrow-to-subtree)
-                                                         (goto-char (point-min))
-                                                         (forward-line 1)
-                                                         (delete-region (point) (point-max)))
-                                                     (if (org-goto-first-child)
-                                                         (org-insert-heading)
-                                                       (goto-char (point-max))
-                                                       (open-line 1)
-                                                       (org-insert-subheading t))
-                                                     (org-jira-insert entry-heading "\n"))
-                                                   (org-toggle-tag "noexport" 'on)
-                                                   ;;  Insert 2 spaces of indentation so Jira markup won't cause org-markup
-                                                   (org-jira-insert
-                                                    (replace-regexp-in-string
-                                                     "^" "  "
-                                                     (format "%s" (slot-value Issue heading-entry)))))))
-             '(description))
+    ;; timeestimate / Effort
+    (let ((val (slot-value Issue 'timeestimate)))
+      (if (not val) (setq val (* 30 60)))
+      (if (and val (= val 0)) (setq val (* 30 60)))
+      (when (and val (>= val 0))
+        (org-jira-entry-put (point) "timeestimate" (number-to-string val))
+        (org-jira-entry-put (point) "Effort" (format "%02d:%02d" (/ val 3600) (% (/ val 60) 60)))))
 
-            (when org-jira-download-comments
-              (org-jira-update-comments-for-issue Issue)
+    (when parent-key
+      (org-jira-entry-put (point) "parent-issue-key" (format "[jira:%s]" parent-key)))
 
-              ;; FIXME: Re-enable when attachments are not erroring.
-              ;;(org-jira-update-attachments-for-current-issue)
-              )
+    (org-jira-entry-put (point) "ID" issue-id)
+    (org-jira-entry-put (point) "CUSTOM_ID" issue-id)
 
-            ;; only sync worklog clocks when the user sets it to be so.
-            (when org-jira-worklog-sync-p
-              (org-jira-update-worklogs-for-issue issue-id filename))))))))
+    ;; Deadline from duedate
+    (when org-jira-deadline-duedate-sync-p
+      (let ((duedate (oref Issue duedate)))
+        (when (> (length duedate) 0)
+          (org-deadline nil duedate))))
+
+    ;; Description sub-heading
+    (mapc
+     (lambda (heading-entry)
+       (ensure-on-issue-id-with-filename issue-id filename
+         (let* ((entry-heading
+                 (concat (symbol-name heading-entry)
+                         (format ": [[%s][%s]]"
+                                 (concat jiralib-url "/browse/" issue-id) issue-id))))
+           (setq p (org-find-exact-headline-in-buffer entry-heading))
+           (if (and p (>= p (point-min)) (<= p (point-max)))
+               (progn
+                 (goto-char p)
+                 (org-narrow-to-subtree)
+                 (goto-char (point-min))
+                 (forward-line 1)
+                 (delete-region (point) (point-max)))
+             (if (org-goto-first-child)
+                 (org-insert-heading)
+               (goto-char (point-max))
+               (open-line 1)
+               (org-insert-subheading t))
+             (org-jira-insert entry-heading "\n"))
+           (org-toggle-tag "noexport" 'on)
+           (org-jira-insert
+            (replace-regexp-in-string
+             "^" "  "
+             (format "%s" (slot-value Issue heading-entry)))))))
+     '(description))))
 
 (defun org-jira--render-issues-from-issue-list (Issues)
   "Add the issues from ISSUES list into the org file(s).
@@ -1595,7 +1693,7 @@ skipped (counted separately; listed in dry-run buffer)."
         (goto-char (point-max))
         (unless (looking-at "^")
           (insert "\n"))
-        (insert "*** ")
+        (insert (if org-jira-group-by-component "**** " "*** "))
         (org-jira-insert headline "\n")
         (org-narrow-to-subtree)
         (org-jira-entry-put (point) "ID" comment-id)
@@ -2152,7 +2250,7 @@ Where issue-id will be something such as \"EX-22\"."
   (save-excursion
     (save-restriction
       (widen)
-      (let* ((org-ids (org-map-entries 'org-id-get "LEVEL=1|LEVEL=2"))
+      (let* ((org-ids (org-map-entries 'org-id-get "LEVEL=1|LEVEL=2|LEVEL=3"))
              (org-ids (delq nil org-ids)))
         ;; It's possible we could be on a non-org-jira headline, but
         ;; that should be an exceptional case and not necessitating a
