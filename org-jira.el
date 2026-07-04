@@ -1361,6 +1361,77 @@ Point must be inside a narrowed subtree for the issue heading."
              (format "%s" (slot-value Issue heading-entry)))))))
      '(description))))
 
+(defun org-jira--render-issues-from-issue-list-optimised (Issues)
+  "Render ISSUES while skipping entries already present in project org files.
+
+This loads the relevant project files once, caches the issue key/status/updated
+values from those files, and avoids rendering issues that are already done but
+not present there, or that are older than the cached org entry."
+  ;; FIXME: Some type of loading error - the first async callback does not know about
+  ;; the issues existing as a class, so we may need to instantiate here if we have none.
+  (when (eq 0 (->> Issues (cl-remove-if-not #'org-jira-sdk-isa-issue?) length))
+    (setq Issues (org-jira-sdk-create-issues-from-data-list Issues)))
+
+  ;; First off, we never ever want to run on non-issues, so check our types early.
+  (setq Issues (cl-remove-if-not #'org-jira-sdk-isa-issue? Issues))
+
+  (let ((loaded-issues (make-hash-table :test 'equal))
+        (project-keys (delete-dups
+                       (mapcar (lambda (Issue)
+                                 (or (oref Issue proj-key)
+                                     (org-jira--get-proj-key (oref Issue issue-id))))
+                               Issues))))
+    (dolist (project-key project-keys)
+      (let* ((project-file (org-jira--get-project-file-name project-key)))
+        (when (file-exists-p project-file)
+          (with-current-buffer (or (find-buffer-visiting project-file)
+                                   (find-file-noselect project-file))
+            (save-excursion
+              (goto-char (point-min))
+              (org-show-all)
+              (when (re-search-forward org-outline-regexp-bol nil t)
+                (org-map-entries
+                 (lambda ()
+                   (let* ((issue-id (or (org-entry-get (point) "ID" t)
+                                        (org-entry-get (point) "CUSTOM_ID" t)))
+                          (status (org-entry-get (point) "status" t))
+                          (updated (org-entry-get (point) "updated" t)))
+                     (when issue-id
+                       (puthash issue-id
+                                (list :status status :updated updated)
+                                loaded-issues))))
+                 nil 'tree))))))
+
+    (setq Issues
+          (cl-remove-if
+           (lambda (Issue)
+             (let* ((issue-id (oref Issue issue-id))
+                    (loaded-entry (and issue-id (gethash issue-id loaded-issues))))
+               (and (not loaded-entry)
+                    (member (org-jira-decode (oref Issue status))
+                            org-jira-done-states))))
+           Issues))
+
+    (setq Issues
+          (cl-remove-if
+           (lambda (Issue)
+             (let* ((issue-id (oref Issue issue-id))
+                    (loaded-entry (and issue-id (gethash issue-id loaded-issues)))
+                    (issue-updated (oref Issue updated))
+                    (loaded-updated (and loaded-entry (plist-get loaded-entry :updated))))
+               (and loaded-entry
+                    issue-updated
+                    loaded-updated
+                    (or (string= issue-updated loaded-updated)
+                        (condition-case nil
+                            (time-less-p (date-to-time issue-updated)
+                                         (date-to-time loaded-updated))
+                          (error nil))))))
+           Issues))
+
+    (when Issues
+      (org-jira--render-issues-from-issue-list Issues)))))
+
 (defun org-jira--render-issues-from-issue-list (Issues)
   "Add the issues from ISSUES list into the org file(s).
 
@@ -2274,7 +2345,7 @@ Where issue-id will be something such as \"EX-22\"."
      (--> cb-data
           list
           (org-jira-sdk-create-issues-from-data-list-with-filename filename it)
-          org-jira--render-issues-from-issue-list))))
+          org-jira--render-issues-from-issue-list-optimised))))
 
 (defun org-jira--refresh-issue-by-id (issue-id)
   "Refresh issue from jira to org using ISSUE-ID."

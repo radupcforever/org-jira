@@ -3,3 +3,4 @@
 *.#*
 flycheck_*
 *.elc
+/.idea
